@@ -438,6 +438,7 @@ type OverlayAction struct {
 	SizeLocal      int64      // 本地文件大小 (如有) / Local file size (if any)
 	SourceCoord    MavenCoord // 来源 jar 的 Maven 坐标 / Source jar Maven coordinates
 	SourceJarName  string     // 来源 jar 文件名 (内层 jar) / Source jar filename (inner jar)
+	OrigLibNames   []string   // jar 内原始文件名列表 (用于创建兼容软链接) / Original filenames inside jar (for compat symlinks)
 	LocalArchInfo  string     // 本地/已有文件的架构扫描结果 / Architecture scan result of the local/existing file
 }
 
@@ -739,6 +740,11 @@ func runOverlay(args []string) {
 	fmt.Printf("  %s\n", T("target_platform", wantOS, wantArch))
 	fmt.Printf("  %s\n\n", T("output_dir", maskPath(outAbs)))
 
+	// 检测跨平台部署,提前通知链接策略 / Detect cross-platform deployment, notify link strategy in advance
+	if runtime.GOOS != wantOS {
+		fmt.Printf("  %s\n\n", T("cross_platform_notice", wantOS, runtime.GOOS))
+	}
+
 	// 按(归一化库 key)聚合 artifacts,统计每个库在每个平台支持的架构集合 / Aggregate artifacts by (normalized library key), count the set of architectures supported by each library on each platform
 	// 用 normalizeLibKey 做分组:去掉 lib 前缀、版本号、架构/平台关键词 / Use normalizeLibKey for grouping: remove lib prefix, version numbers, architecture/platform keywords
 	// 这样 libsnappyjava.so 和 snappyjava.so、libzstd-jni-1.5.5-5.so 都能正确合并 / So libsnappyjava.so, snappyjava.so, and libzstd-jni-1.5.5-5.so can all be merged correctly
@@ -748,6 +754,7 @@ func runOverlay(args []string) {
 		platformPath  map[string]string          // platform → 一个 jar 内路径样本 / platform → a sample path inside the jar
 		platformSize  map[string]int64           // platform → 样本文件大小 / platform → sample file size
 		jarLibName    map[string]string          // platform → jar 内原文件名 / platform → original filename inside the jar
+		jarLibNames   map[string][]string        // platform → jar 内所有原文件名 (用于兼容软链接) / platform → all original filenames (for compat symlinks)
 		displayName   string                     // 归一化展示名 (保留 lib 前缀,用于输出) / Normalized display name (keep lib prefix, for output)
 		sourceCoord   MavenCoord                 // 来源 jar 的 Maven 坐标 / Source jar Maven coordinates
 		sourceJarName string                     // 来源 jar 文件名 / Source jar filename
@@ -770,6 +777,7 @@ func runOverlay(args []string) {
 				platformPath:  map[string]string{},
 				platformSize:  map[string]int64{},
 				jarLibName:    map[string]string{},
+				jarLibNames:   map[string][]string{},
 				displayName:   displayName,
 				sourceCoord:   art.SourceCoord,
 				sourceJarName: art.SourceJarName,
@@ -788,6 +796,17 @@ func runOverlay(args []string) {
 			info.platformPath[artOS] = art.Path
 			info.platformSize[artOS] = art.FileSize
 			info.jarLibName[artOS] = libFile
+		}
+		// 收集该平台所有原始文件名 (去重,用于创建兼容软链接) / Collect all original filenames for this platform (deduplicated, for compat symlinks)
+		found := false
+		for _, n := range info.jarLibNames[artOS] {
+			if n == libFile {
+				found = true
+				break
+			}
+		}
+		if !found {
+			info.jarLibNames[artOS] = append(info.jarLibNames[artOS], libFile)
 		}
 	}
 
@@ -866,6 +885,7 @@ func runOverlay(args []string) {
 			OutPath:        filepath.Join(outAbs, normName),
 			SourceCoord:    info.sourceCoord,
 			SourceJarName:  info.sourceJarName,
+			OrigLibNames:   info.jarLibNames[wantOS],
 		}
 
 		// 1) 优先匹配 -local 指定的本地文件 / 1) Preferentially match local files specified by -local
@@ -1053,6 +1073,8 @@ func runOverlay(args []string) {
 				} else {
 					processed++
 					copyList = append(copyList, a)
+					// 为原始文件名创建兼容链接 / Create compat links for original filenames
+					createCompatLinks(a.OutPath, a.OrigLibNames, wantOS, wantArch)
 				}
 			}
 		}
@@ -1087,6 +1109,8 @@ func runOverlay(args []string) {
 					archInfo := scanDownloadedFile(a.OutPath, fi.Size())
 					fmt.Fprintf(os.Stderr, "      %s\n", T("download_success", fi.Size(), archInfo))
 				}
+				// 为原始文件名创建兼容链接 / Create compat links for original filenames
+				createCompatLinks(a.OutPath, a.OrigLibNames, wantOS, wantArch)
 				break
 			}
 			if !success {
@@ -1135,6 +1159,174 @@ func copyFile(src, dst string) error {
 		_ = os.Chmod(dst, si.Mode())
 	}
 	return nil
+}
+
+// createCompatLinks 为原始文件名创建兼容链接,使 JVM 的 loadLibrary("foo-arm64") 也能命中 / createCompatLinks creates compat links for original filenames, so JVM's loadLibrary("foo-arm64") also hits
+// 跨平台策略: 当前 OS 与目标 OS 一致时 → 软链接优先 (同文件系统高效) / Cross-platform strategy: when current OS matches target OS → symlink first (efficient on same filesystem)
+// 当前 OS 与目标 OS 不同时 → 强制文件复制 (硬链接/Windows 软链接跨系统不可移植) / When OS differs → force file copy (hardlinks/Windows symlinks are not portable across systems)
+// 架构替换: 原始文件名含非目标架构时,替换为目标架构的所有常见命名变体后创建链接 / Arch replacement: when original filename contains non-target arch, replace with all common naming variants of target arch
+func createCompatLinks(normPath string, origNames []string, targetOS, targetArch string) {
+	normBase := filepath.Base(normPath)
+	dir := filepath.Dir(normPath)
+	// 判断是否跨平台部署 (当前系统 OS ≠ 目标 OS) / Determine cross-platform deployment (current system OS ≠ target OS)
+	curOS := runtime.GOOS
+	isCrossPlatform := curOS != targetOS
+	targetArchNorm := normalizeArch(targetArch)
+
+	// createOne 创建单个兼容链接 (内部函数,复用逻辑) / createOne creates a single compat link (inner function, reuses logic)
+	createOne := func(linkName string) {
+		if linkName == normBase {
+			return
+		}
+		linkPath := filepath.Join(dir, linkName)
+		// 如果已存在且不是链接,跳过 (避免覆盖真实文件) / Skip if exists and is not a link (avoid overwriting real files)
+		if fi, err := os.Lstat(linkPath); err == nil {
+			if fi.Mode()&os.ModeSymlink == 0 && fi.Size() > 0 {
+				return
+			}
+			os.Remove(linkPath)
+		}
+		if isCrossPlatform {
+			// 跨平台部署:直接用文件复制,确保目标系统可用 / Cross-platform deployment: always copy to ensure target system compatibility
+			if err := copyFile(normPath, linkPath); err == nil {
+				fmt.Fprintf(os.Stderr, "%s\n", T("link_copy", linkName, normBase))
+				return
+			}
+			fmt.Fprintf(os.Stderr, "%s\n", T("link_fail", linkName, fmt.Errorf("copy failed")))
+		} else {
+			// 同平台:软链接 → 硬链接 → 复制 (效率优先) / Same platform: symlink → hardlink → copy (efficiency first)
+			if err := os.Symlink(normBase, linkPath); err == nil {
+				fmt.Fprintf(os.Stderr, "%s\n", T("link_symlink", linkName, normBase))
+				return
+			}
+			if err := os.Link(normPath, linkPath); err == nil {
+				fmt.Fprintf(os.Stderr, "%s\n", T("link_hardlink", linkName, normBase))
+				return
+			}
+			if err := copyFile(normPath, linkPath); err == nil {
+				fmt.Fprintf(os.Stderr, "%s\n", T("link_copy", linkName, normBase))
+				return
+			}
+			fmt.Fprintf(os.Stderr, "%s\n", T("link_fail", linkName, fmt.Errorf("all methods failed")))
+		}
+	}
+
+	for _, orig := range origNames {
+		if orig == normBase {
+			continue
+		}
+		// 检查原始文件名中的架构关键词 / Check arch keyword in original filename
+		origArch, hasArch := extractArchFromName(orig)
+		if !hasArch {
+			// 无架构关键词,直接创建链接 / No arch keyword, create link directly
+			createOne(orig)
+			continue
+		}
+		if origArch == targetArchNorm {
+			// 架构匹配,直接创建链接 / Arch matches, create link directly
+			createOne(orig)
+			continue
+		}
+		// 架构不符:替换为目标架构的所有常见命名变体 / Arch mismatch: replace with all common naming variants of target arch
+		variants := generateArchVariants(orig, origArch, targetArchNorm)
+		for _, v := range variants {
+			fmt.Fprintf(os.Stderr, "%s\n", T("link_arch_replace", orig, v, origArch, targetArchNorm))
+			createOne(v)
+		}
+	}
+}
+
+// extractArchFromName 从文件名中提取架构关键词,返回 (原始关键词, 归一化架构, 是否找到) / extractArchFromName extracts architecture keyword from filename, returns (raw keyword, normalized arch, found)
+// 例如 libfoo_x86_64.so → ("x86_64", "x86_64", true), libfoo.so → ("", "", false) / e.g. libfoo_x86_64.so → ("x86_64", "x86_64", true), libfoo.so → ("", "", false)
+func extractArchFromName(fileName string) (string, bool) {
+	lower := strings.ToLower(fileName)
+	// 按长度降序排列,避免短关键词先匹配 (如 arm 匹配到 aarch64 中的子串) / Sort by length descending to avoid short keywords matching substrings (e.g. arm matching inside aarch64)
+	archKeywords := []string{
+		"aarch_64", "aarch64", "aarch_", "aarch",
+		"loongarch64", "loongarch32", "loongarch",
+		"x86_64", "x86_", "x86",
+		"arm64", "arm_64", "armv7", "arm",
+		"amd64", "riscv64", "riscv32", "riscv",
+		"sparc64", "sparc", "ppc64", "ppc",
+		"s390x", "s390", "mips64", "mips",
+		"i386", "i686",
+	}
+	for _, kw := range archKeywords {
+		if strings.Contains(lower, kw) {
+			return normalizeArch(kw), true
+		}
+	}
+	return "", false
+}
+
+// archKeywordVariants 返回某个归一化架构的所有常见命名变体 (用于文件名替换) / archKeywordVariants returns all common naming variants of a normalized arch (for filename replacement)
+// 不同库的命名风格不同: netty 用 aarch_64, 通用用 aarch64, Apple 用 arm64 / Different libraries use different naming styles: netty uses aarch_64, generic uses aarch64, Apple uses arm64
+func archKeywordVariants(archNorm string) []string {
+	switch archNorm {
+	case "aarch64":
+		return []string{"aarch64", "aarch_64", "arm64"}
+	case "x86_64":
+		return []string{"x86_64", "amd64", "x64"}
+	case "i386":
+		return []string{"i386", "i686", "x86"}
+	case "arm":
+		return []string{"arm", "armv7"}
+	case "riscv64":
+		return []string{"riscv64"}
+	case "riscv32":
+		return []string{"riscv32"}
+	case "ppc64":
+		return []string{"ppc64", "ppc64le"}
+	case "s390x":
+		return []string{"s390x"}
+	case "loongarch64":
+		return []string{"loongarch64"}
+	case "mips64":
+		return []string{"mips64"}
+	case "mips":
+		return []string{"mips"}
+	default:
+		return []string{archNorm}
+	}
+}
+
+// generateArchVariants 将文件名中的原始架构关键词替换为目标架构的所有变体 / generateArchVariants replaces the original arch keyword in filename with all variants of the target arch
+// 例如 generateArchVariants("libfoo_x86_64.so", "x86_64", "aarch64") → ["libfoo_aarch64.so", "libfoo_aarch_64.so", "libfoo_arm64.so"] / e.g. generateArchVariants("libfoo_x86_64.so", "x86_64", "aarch64") → ["libfoo_aarch64.so", "libfoo_aarch_64.so", "libfoo_arm64.so"]
+func generateArchVariants(origName, fromArchNorm, toArchNorm string) []string {
+	lower := strings.ToLower(origName)
+	// 找到原始架构的所有变体关键词 / Find all variant keywords of the original arch
+	fromVariants := archKeywordVariants(fromArchNorm)
+	// 找到目标架构的所有变体关键词 / Find all variant keywords of the target arch
+	toVariants := archKeywordVariants(toArchNorm)
+
+	// 确定实际匹配到的原始关键词 (可能是变体之一) / Determine the actually matched original keyword (could be one of the variants)
+	matchedKW := ""
+	for _, v := range fromVariants {
+		if strings.Contains(lower, v) {
+			matchedKW = v
+			break
+		}
+	}
+	if matchedKW == "" {
+		return nil
+	}
+
+	// 替换为每个目标变体,去重 / Replace with each target variant, deduplicated
+	seen := map[string]bool{}
+	var results []string
+	for _, toKW := range toVariants {
+		newName := strings.ReplaceAll(origName, matchedKW, toKW)
+		// 保持原始大小写风格 (文件名可能是混合大小写) / Preserve original case style (filename might be mixed case)
+		if matchedKW != strings.ToLower(matchedKW) {
+			// 原始关键词含大写,用 ToLower 替换后再处理 / Original keyword has uppercase, replace then handle
+			newName = strings.ReplaceAll(strings.ToLower(origName), strings.ToLower(matchedKW), toKW)
+		}
+		if !seen[newName] {
+			seen[newName] = true
+			results = append(results, newName)
+		}
+	}
+	return results
 }
 
 // downloadFile 下载 URL 到 dst 路径,先写临时文件再 rename 原子替换 / downloadFile downloads a URL to the dst path, writes to a temp file first, then atomically renames
