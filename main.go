@@ -397,7 +397,7 @@ func runJarDir(dirPath string, offline bool) {
 	platSet := map[string]struct{}{}
 	archSet := map[string]struct{}{}
 	for _, a := range mergedNS.Artifacts {
-		if a.Platform != "" && a.Platform != "未知" {
+		if a.Platform != "" && a.Platform != "unknown" {
 			platSet[a.Platform] = struct{}{}
 		}
 		for _, arch := range a.Archs {
@@ -429,7 +429,7 @@ type OverlayAction struct {
 	Format         string     // ELF / Mach-O / PE
 	TargetArch     string     // 目标架构,如 x86_64 / Target architecture, e.g. x86_64
 	SupportedArchs []string   // 该库在目标平台已支持的架构集合 / Set of architectures already supported by this library on the target platform
-	Status         string     // "本地指定" / "已有" / "需下载" / "缺少来源" / "不匹配" / "locally specified" / "exists" / "needs download" / "missing source" / "mismatch"
+	Status         string     // "supported" / "local" / "exists" / "download" / "missing" (内部用英文,显示时用 T() 国际化)
 	SourceLocal    string     // -local 指定的本地文件路径 / Local file path specified by -local
 	SourceJarPath  string     // jar 内部路径 (用于展示) / Internal path inside the jar (for display)
 	DownloadURLs   []string   // 候选下载 URL 列表 (支持多源回退) / List of candidate download URLs (supports multi-source fallback)
@@ -767,7 +767,7 @@ func runOverlay(args []string) {
 	libInfos := map[string]*libInfo{}
 
 	for _, art := range ns.Artifacts {
-		if art.Platform == "" || art.Platform == "未知" || art.Format == "Unknown" || len(art.Archs) == 0 {
+		if art.Platform == "" || art.Platform == "unknown" || art.Format == "Unknown" || len(art.Archs) == 0 {
 			continue
 		}
 		artOS := normalizePlatform(art.Platform)
@@ -857,7 +857,7 @@ func runOverlay(args []string) {
 				OutPath:        filepath.Join(outAbs, normName),
 				SourceCoord:    info.sourceCoord,
 				SourceJarName:  info.sourceJarName,
-				Status:         "已支持",
+				Status:         "supported",
 			}
 			supportedActions = append(supportedActions, suppAct)
 			continue
@@ -910,7 +910,7 @@ func runOverlay(args []string) {
 		if localPath != "" {
 			if fi, err := os.Stat(localPath); err == nil {
 				act.SourceLocal = localPath
-				act.Status = "本地指定"
+				act.Status = "local"
 				act.SizeLocal = fi.Size()
 				act.LocalArchInfo = scanDownloadedFile(localPath, fi.Size())
 				actions = append(actions, act)
@@ -920,7 +920,7 @@ func runOverlay(args []string) {
 
 		// 2) 检查 outdir 里是否已经有同名文件了 / 2) Check whether a file with the same name already exists in outdir
 		if fi, err := os.Stat(act.OutPath); err == nil {
-			act.Status = "已有"
+			act.Status = "exists"
 			act.SizeLocal = fi.Size()
 			act.LocalArchInfo = scanDownloadedFile(act.OutPath, fi.Size())
 			actions = append(actions, act)
@@ -936,16 +936,16 @@ func runOverlay(args []string) {
 			// 用户指定了镜像模板,生成 .so 文件直接下载 URL / User specified a mirror template, generate direct .so file download URL
 			url := expandMirrorURL(*mirror, normName, libRoot, osName, wantArch)
 			act.DownloadURLs = []string{url}
-			act.Status = "需下载"
+			act.Status = "download"
 		} else if info.sourceCoord.GroupID != "" {
 			// 有 Maven 坐标:从 Maven 仓库下载 jar 包,再从中提取 .so / Has Maven coordinates: download jar from Maven repository, then extract .so from it
 			// 不同库的架构 classifier 命名不同 (如 netty 用 aarch_64,通用用 aarch64), / Different libraries use different architecture classifier naming (e.g. netty uses aarch_64, generic uses aarch64),
 			// 生成多个候选 jar 文件名 × 多个镜像源 / Generate multiple candidate jar filenames × multiple mirror sources
 			act.DownloadURLs = buildMavenJarURLs(info.sourceCoord, info.sourceJarName, wantArch)
-			act.Status = "需下载"
+			act.Status = "download"
 		} else {
 			// 没有 Maven 坐标,标记为缺少来源 / No Maven coordinates, mark as missing source
-			act.Status = "缺少来源"
+			act.Status = "missing"
 		}
 		actions = append(actions, act)
 	}
@@ -983,14 +983,14 @@ func runOverlay(args []string) {
 	for _, a := range actions {
 		tag := ""
 		switch a.Status {
-		case "本地指定":
+		case "local":
 			tag = T("tag_local")
-		case "已有":
+		case "exists":
 			tag = T("tag_exist")
-		case "需下载":
+		case "download":
 			tag = T("tag_download")
 			downloadList = append(downloadList, a)
-		case "缺少来源":
+		case "missing":
 			tag = T("tag_missing")
 		}
 		// 检查和 jar 内部文件大小是否接近 (判断版本是否接近) / Check whether the size is close to the file inside the jar (to judge whether the versions are close)
@@ -1071,7 +1071,7 @@ func runOverlay(args []string) {
 	if *doDownload {
 		// 先复制本地指定 / First copy locally specified files
 		for _, a := range actions {
-			if a.Status == "本地指定" {
+			if a.Status == "local" {
 				if err := copyFile(a.SourceLocal, a.OutPath); err != nil {
 					fmt.Fprintf(os.Stderr, "  %s\n", T("copy_fail", a.SourceLocal, err))
 					failed++
@@ -1172,7 +1172,7 @@ func runOverlay(args []string) {
 	}
 
 	fmt.Println()
-	fmt.Println("--- Java 启动参数建议 ---")
+	fmt.Println(T("java_cmd_header"))
 	jarAbs, _ := filepath.Abs(jarPath)
 	fmt.Printf("  %s\n\n", T("java_cmd", maskPath(outAbs), maskPath(jarAbs)))
 	fmt.Println("  " + T("java_cmd_hint"))
@@ -1799,7 +1799,7 @@ func analyzeArchGaps(artifacts []NativeArtifact) []ArchGap {
 	// 1. 按平台分组,计算每个平台的完整架构集 / 1. Group by platform, compute the complete architecture set for each platform
 	platformArchs := map[string]map[string]struct{}{}
 	for _, a := range artifacts {
-		if a.Platform == "" || a.Platform == "未知" {
+		if a.Platform == "" || a.Platform == "unknown" {
 			continue
 		}
 		if platformArchs[a.Platform] == nil {
@@ -1822,7 +1822,7 @@ func analyzeArchGaps(artifacts []NativeArtifact) []ArchGap {
 	groupFormat := map[key]string{}
 	groupDisplay := map[key]string{}
 	for _, a := range artifacts {
-		if a.Platform == "" || a.Platform == "未知" {
+		if a.Platform == "" || a.Platform == "unknown" {
 			continue
 		}
 		libFile := filepath.Base(a.Path)
@@ -1904,7 +1904,7 @@ func printResult(title string, libs []types.Library, deps []types.Dependency, ns
 			platformArchsMap := map[string]map[string]struct{}{}
 			platformFormatMap := map[string]string{}
 			for _, a := range ns.Artifacts {
-				if a.Platform == "" || a.Platform == "未知" {
+				if a.Platform == "" || a.Platform == "unknown" {
 					continue
 				}
 				if platformArchsMap[a.Platform] == nil {
@@ -2089,7 +2089,7 @@ func scanJarNativeArtifacts(jarPath string) ScanResult {
 	platSet := map[string]struct{}{}
 	archSet := map[string]struct{}{}
 	for _, a := range result.Artifacts {
-		if a.Platform != "" && a.Platform != "未知" {
+		if a.Platform != "" && a.Platform != "unknown" {
 			platSet[a.Platform] = struct{}{}
 		}
 		for _, arch := range a.Archs {
@@ -2228,7 +2228,7 @@ func analyzeNativeEntry(fe *zip.File, displayPath string, coord MavenCoord, jarN
 		strings.HasSuffix(strings.ToLower(name), ".lib") {
 		art.Platform = "Windows"
 	} else {
-		art.Platform = "未知"
+		art.Platform = "unknown"
 	}
 
 	// 读取条目内容的头部做二进制解析 / Read the header of the entry content for binary parsing
