@@ -329,6 +329,9 @@ var zhStrings = map[string]string{
 	"link_skip":             "  → 跳过 %s (与目标同名)",
 	"link_arch_replace":     "  → 架构替换 %s → %s (原 %s → 目标 %s)",
 	"cross_platform_notice": "⚠ 跨平台部署: 目标 %s ≠ 当前 %s,兼容链接将使用文件复制 (确保目标系统可移植)",
+	"cache_hit":             "  ✓ 缓存命中 %s",
+	"cache_downloading":     "  → 缓存未命中,下载到 %s",
+	"cache_saved":           "  ✓ 已缓存 %s (%d B)",
 
 	// 下载相关 / Download related
 	"cannot_read":        "(无法读取)",
@@ -428,6 +431,9 @@ var enStrings = map[string]string{
 	"link_skip":             "  → Skip %s (same as target)",
 	"link_arch_replace":     "  → Arch replace %s → %s (from %s → target %s)",
 	"cross_platform_notice": "⚠ Cross-platform deployment: target %s ≠ current %s, compat links will use file copy (portable to target system)",
+	"cache_hit":             "  ✓ Cache hit %s",
+	"cache_downloading":     "  → Cache miss, downloading to %s",
+	"cache_saved":           "  ✓ Cached %s (%d B)",
 
 	// Download related
 	"cannot_read":        "(unreadable)",

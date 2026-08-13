@@ -10,6 +10,7 @@ native-overlay/*
 .rollup.cache
 node_modules
 dist.zip
+.jarCache
 # dist
 dist-ssr
 dist

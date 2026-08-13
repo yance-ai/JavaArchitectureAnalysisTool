@@ -740,6 +740,11 @@ func runOverlay(args []string) {
 	fmt.Printf("  %s\n", T("target_platform", wantOS, wantArch))
 	fmt.Printf("  %s\n\n", T("output_dir", maskPath(outAbs)))
 
+	// 初始化 jar 缓存目录 / Initialize jar cache directory
+	if err := ensureCacheDir(); err != nil {
+		fmt.Fprintf(os.Stderr, "  %s\n", T("cannot_read"))
+	}
+
 	// 检测跨平台部署,提前通知链接策略 / Detect cross-platform deployment, notify link strategy in advance
 	if runtime.GOOS != wantOS {
 		fmt.Printf("  %s\n\n", T("cross_platform_notice", wantOS, runtime.GOOS))
@@ -1083,27 +1088,68 @@ func runOverlay(args []string) {
 			fmt.Fprintf(os.Stderr, "  %s\n", T("downloading", a.LibraryName, maskPath(a.OutPath)))
 			success := false
 			var lastErr error
-			for i, url := range a.DownloadURLs {
-				fmt.Fprintf(os.Stderr, "    %s\n", T("try_source", i+1, url))
-				if a.SourceCoord.GroupID != "" && *mirror == "" {
-					// Maven 下载:下载 jar 到临时文件,从中提取匹配目标架构的 .so / Maven download: download jar to a temp file, extract .so matching the target architecture from it
-					err := downloadJarAndExtractSO(client, url, a.OutPath, a.TargetArch, a.LibraryName)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "      %s\n", T("download_fail", err))
-						lastErr = err
-						os.Remove(a.OutPath)
-						continue
-					}
-				} else {
-					// 直接下载 .so 文件 (-mirror 模式) / Download .so file directly (-mirror mode)
-					if err := downloadFile(client, url, a.OutPath); err != nil {
-						fmt.Fprintf(os.Stderr, "      %s\n", T("download_fail", err))
-						lastErr = err
-						os.Remove(a.OutPath)
-						continue
+			useCache := a.SourceCoord.GroupID != "" && *mirror == ""
+			// 步骤 1: Maven 模式下先查所有候选 URL 对应的缓存,命中则跳过下载 (直接从缓存 jar 提取) / Step 1: Maven mode — check cache for all candidate URLs first, skip download on cache hit (extract directly from cached jar)
+			if useCache {
+				for _, url := range a.DownloadURLs {
+					jarFile := jarFileNameFromURL(url)
+					cp := cachePathForJar(a.SourceCoord, jarFile)
+					if fi, err := os.Stat(cp); err == nil && fi.Size() > 0 {
+						fmt.Fprintf(os.Stderr, "%s\n", T("cache_hit", maskPath(cp)))
+						if err := extractSOFromJar(cp, a.OutPath, a.TargetArch, a.LibraryName); err != nil {
+							fmt.Fprintf(os.Stderr, "      %s\n", T("download_fail", err))
+							lastErr = err
+							os.Remove(a.OutPath)
+							continue
+						}
+						success = true
+						break
 					}
 				}
-				success = true
+			}
+			if !success {
+				// 步骤 2: 缓存未命中,正常下载 / Step 2: cache miss, download normally
+				for i, url := range a.DownloadURLs {
+					fmt.Fprintf(os.Stderr, "    %s\n", T("try_source", i+1, url))
+					if useCache {
+						// Maven 模式: 下载到 .jarCache 目录,再从缓存提取 / Maven mode: download to .jarCache, then extract from cache
+						jarFile := jarFileNameFromURL(url)
+						cp := cachePathForJar(a.SourceCoord, jarFile)
+						// 创建缓存子目录 (如不存在) / Create cache subdir if missing
+						if err := os.MkdirAll(filepath.Dir(cp), 0755); err != nil {
+							lastErr = err
+							continue
+						}
+						fmt.Fprintf(os.Stderr, "      %s\n", T("cache_downloading", maskPath(cp)))
+						if err := downloadFile(client, url, cp); err != nil {
+							fmt.Fprintf(os.Stderr, "      %s\n", T("download_fail", err))
+							lastErr = err
+							continue
+						}
+						if fi, err := os.Stat(cp); err == nil {
+							fmt.Fprintf(os.Stderr, "%s\n", T("cache_saved", maskPath(cp), fi.Size()))
+						}
+						// 从刚下载的缓存 jar 中提取 .so / Extract .so from the freshly downloaded cached jar
+						if err := extractSOFromJar(cp, a.OutPath, a.TargetArch, a.LibraryName); err != nil {
+							fmt.Fprintf(os.Stderr, "      %s\n", T("download_fail", err))
+							lastErr = err
+							os.Remove(a.OutPath)
+							continue
+						}
+					} else {
+						// 直接下载 .so 文件 (-mirror 模式) / Download .so file directly (-mirror mode)
+						if err := downloadFile(client, url, a.OutPath); err != nil {
+							fmt.Fprintf(os.Stderr, "      %s\n", T("download_fail", err))
+							lastErr = err
+							os.Remove(a.OutPath)
+							continue
+						}
+					}
+					success = true
+					break
+				}
+			}
+			if success {
 				if fi, err := os.Stat(a.OutPath); err == nil {
 					// 扫描下载文件的架构信息 / Scan the architecture info of the downloaded file
 					archInfo := scanDownloadedFile(a.OutPath, fi.Size())
@@ -1111,7 +1157,6 @@ func runOverlay(args []string) {
 				}
 				// 为原始文件名创建兼容链接 / Create compat links for original filenames
 				createCompatLinks(a.OutPath, a.OrigLibNames, wantOS, wantArch)
-				break
 			}
 			if !success {
 				fmt.Fprintf(os.Stderr, "    %s\n", T("all_sources_fail", lastErr))
@@ -1327,6 +1372,89 @@ func generateArchVariants(origName, fromArchNorm, toArchNorm string) []string {
 		}
 	}
 	return results
+}
+
+// cacheJarRoot 返回 jar 缓存目录的绝对路径 (当前目录下的 .jarCache) / cacheJarRoot returns the absolute path of the jar cache directory (.jarCache under current dir)
+func cacheJarRoot() string {
+	wd, _ := os.Getwd()
+	return filepath.Join(wd, ".jarCache")
+}
+
+// ensureCacheDir 创建缓存目录 (如不存在) / ensureCacheDir creates the cache directory if it does not exist
+func ensureCacheDir() error {
+	return os.MkdirAll(cacheJarRoot(), 0755)
+}
+
+// cachePathForJar 根据 Maven 坐标和 jar 文件名计算缓存路径 (Maven 本地仓库目录结构) / cachePathForJar computes the cache path based on Maven coordinates and jar filename (Maven local repo layout)
+// 目录结构: .jarCache/group/id/artifactId/version/artifactId-version-classifier.jar / Dir structure: .jarCache/group/id/artifactId/version/artifactId-version-classifier.jar
+func cachePathForJar(coord MavenCoord, jarFileName string) string {
+	groupPath := strings.ReplaceAll(coord.GroupID, ".", string(filepath.Separator))
+	return filepath.Join(cacheJarRoot(), groupPath, coord.ArtifactID, coord.Version, jarFileName)
+}
+
+// jarFileNameFromURL 从 Maven URL 中提取 jar 文件名 / jarFileNameFromURL extracts the jar filename from a Maven URL
+func jarFileNameFromURL(url string) string {
+	// 取最后一个 "/" 之后的部分 / Take the part after the last "/"
+	i := strings.LastIndex(url, "/")
+	if i < 0 {
+		return url
+	}
+	return url[i+1:]
+}
+
+// extractSOFromJar 从 jar 文件(本地路径)中提取匹配目标架构的本地库到 dst / extractSOFromJar extracts the native library matching target architecture from a local jar file to dst
+func extractSOFromJar(jarPath, dst, targetArch, libName string) error {
+	zr, err := zip.OpenReader(jarPath)
+	if err != nil {
+		return fmt.Errorf(T("open_failed"), jarPath, err)
+	}
+	defer zr.Close()
+	targetArchNorm := normalizeArch(targetArch)
+	var bestMatch *zip.File
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() || !isNativeEntry(f.Name) {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		head := make([]byte, 1024*1024)
+		n, err := io.ReadFull(rc, head)
+		rc.Close()
+		if err != nil && err != io.ErrUnexpectedEOF {
+			continue
+		}
+		head = head[:n]
+		_, archs := detectBinaryArch(head, int64(f.UncompressedSize64))
+		for _, a := range archs {
+			if normalizeArch(a) == targetArchNorm {
+				bestMatch = f
+				break
+			}
+		}
+		if bestMatch != nil {
+			break
+		}
+	}
+	if bestMatch == nil {
+		return fmt.Errorf("jar 内未找到 %s 架构的 %s", targetArch, libName)
+	}
+	rc, err := bestMatch.Open()
+	if err != nil {
+		return fmt.Errorf("打开 jar 内条目失败: %v", err)
+	}
+	defer rc.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, rc); err != nil {
+		out.Close()
+		return err
+	}
+	out.Close()
+	return nil
 }
 
 // downloadFile 下载 URL 到 dst 路径,先写临时文件再 rename 原子替换 / downloadFile downloads a URL to the dst path, writes to a temp file first, then atomically renames
