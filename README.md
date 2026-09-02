@@ -1,46 +1,46 @@
 # JavaArchitectureAnalysisTool
 
-一个用于分析 Java jar 包内部结构的命令行工具,重点识别 jar 内嵌的 C/C++ 本地库(.so / .dylib / .dll / .a / .jnilib / .lib)所支持的平台和 CPU 架构,帮助判断 jar 是否能在目标平台(如 ARM Linux、Apple Silicon macOS)运行。
+A command-line tool for analyzing the internal structure of Java jar packages, focusing on identifying the platforms and CPU architectures supported by C/C++ native libraries (.so / .dylib / .dll / .a / .jnilib / .lib) embedded in jars. Helps determine whether a jar can run on target platforms (e.g., ARM Linux, Apple Silicon macOS).
 
-## 功能概览
+## Features
 
-- **`jar` 子命令**:扫描 jar 内的本地二进制产物,识别格式(ELF / Mach-O / PE / XCOFF / Archive)和 CPU 架构(x86_64 / aarch64 / riscv64 / loongarch64 / s390x / ppc64 等),并按平台归一化分析架构覆盖差异
-- **`pom` 子命令**:解析 Maven 的 pom.xml,输出完整传递依赖树和依赖关系图
-- **`overlay` 子命令**:生成本地库覆盖方案,基于 `java.library.path` 原理实现外部库优先加载,跳过 jar 内同名库(用于补架构、换版本、修复漏洞等场景)
+- **`jar` subcommand**: Scans native binary artifacts inside jars, identifies formats (ELF / Mach-O / PE / XCOFF / Archive) and CPU architectures (x86_64 / aarch64 / riscv64 / loongarch64 / s390x / ppc64, etc.), and analyzes architecture coverage gaps per platform with normalization
+- **`pom` subcommand**: Parses Maven's pom.xml, outputs complete transitive dependency tree and dependency relationship graph
+- **`overlay` subcommand**: Generates native library overlay plans based on the `java.library.path` mechanism to prioritize external library loading, skipping same-named libraries inside jars (for adding architectures, changing versions, fixing vulnerabilities, etc.)
 
-## 支持的 jar 打包格式
+## Supported Jar Packaging Formats
 
-| 打包格式 | 典型后缀 | 是否支持 |
-|---------|---------|:---:|
-| maven-assembly `with-dependencies`(平铺式) | `.jar` | ✅ |
-| Spring Boot Executable jar(嵌套式 `BOOT-INF/lib/*.jar`) | `.jar` | ✅ |
-| WAR 包(`WEB-INF/lib/*.jar`) | `.war` | ✅ |
-| EAR 包(`lib/*.jar`) | `.ear` | ✅ |
-| Hadoop/Spark tar 分发解压后的 lib 目录 | 目录 | ✅ |
-| Maven 本地仓库目录 | 目录 | ✅ |
+| Packaging Format | Typical Extension | Supported |
+|------------------|-------------------|:---------:|
+| maven-assembly `with-dependencies` (flat) | `.jar` | ✅ |
+| Spring Boot Executable jar (nested `BOOT-INF/lib/*.jar`) | `.jar` | ✅ |
+| WAR package (`WEB-INF/lib/*.jar`) | `.war` | ✅ |
+| EAR package (`lib/*.jar`) | `.ear` | ✅ |
+| Hadoop/Spark tar distribution lib directory | directory | ✅ |
+| Maven local repository directory | directory | ✅ |
 
-`jar` 子命令传目录时会递归扫描所有 `.jar` 文件,合并结果;对每个 jar 内部的嵌套 jar 也会递归扫描(最大嵌套深度 5 层,单嵌套 jar 限 200MB,防 zip 炸弹)。
+The `jar` subcommand recursively scans all `.jar` files when given a directory, merging results; nested jars inside each jar are also recursively scanned (max nesting depth 5, single nested jar limited to 200MB, to prevent zip bombs).
 
-## 安装
+## Installation
 
-直接使用预编译二进制(见 `dist/` 目录),或自行构建:
+Use precompiled binaries directly (see `dist/` directory), or build from source:
 
 ```bash
 go build -trimpath -ldflags "-s -w" -o JavaArchitectureAnalysisTool .
 ```
 
-或使用 `build.sh` 脚本一键编译所有平台:
+Or use the `build.sh` script to build all platforms at once:
 
 ```bash
-./build.sh              # 编译所有平台到 dist/
-./build.sh current      # 仅编译当前平台
-./build.sh linux        # 仅编译 Linux (amd64 + arm64)
-./build.sh windows      # 仅编译 Windows (amd64)
-./build.sh darwin       # 仅编译 macOS (含 universal)
-./build.sh clean        # 清理 dist/
+./build.sh              # Build all platforms to dist/
+./build.sh current      # Build current platform only
+./build.sh linux        # Build Linux only (amd64 + arm64)
+./build.sh windows      # Build Windows only (amd64)
+./build.sh darwin       # Build macOS only (incl. universal)
+./build.sh clean        # Clean dist/
 ```
 
-跨平台手动编译:
+Cross-platform manual compilation:
 
 ```bash
 # Linux x86_64
@@ -53,229 +53,229 @@ GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o JavaArchitectur
 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o JavaArchitectureAnalysisTool-darwin-amd64 .
 # macOS arm64 (Apple Silicon)
 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o JavaArchitectureAnalysisTool-darwin-arm64 .
-# macOS Universal Binary (需在 macOS 上执行)
+# macOS Universal Binary (must be executed on macOS)
 lipo -create -output JavaArchitectureAnalysisTool-darwin-universal \
     JavaArchitectureAnalysisTool-darwin-amd64 \
     JavaArchitectureAnalysisTool-darwin-arm64
 ```
 
-目标机器不需要安装 Go 环境,二进制为静态链接。
+No Go runtime required on the target machine; binaries are statically linked.
 
-## 使用守则
+## Usage Guide
 
-### 1. `jar` 子命令 — 分析本地架构产物
+### 1. `jar` Subcommand — Analyze Native Architecture Artifacts
 
 ```bash
-# 单个 jar
+# Single jar
 JavaArchitectureAnalysisTool jar /path/to/app.jar
 
-# 目录下所有 jar (Hadoop lib / Maven 仓库等)
+# All jars in a directory (Hadoop lib / Maven repo, etc.)
 JavaArchitectureAnalysisTool jar /opt/hadoop/share/hadoop/common/lib/
 
-# 离线模式,不访问 Maven Central (架构扫描本身不联网,仅库识别离线)
+# Offline mode, no Maven Central access (architecture scanning itself doesn't use network; only library identification is offline)
 JavaArchitectureAnalysisTool jar -offline /path/to/app.jar
 
-# 英文输出
+# English output
 JavaArchitectureAnalysisTool jar -lang en /path/to/app.jar
 
-# 参数可混排 (位置参数前后均可)
+# Mixed parameter order (positional args before or after flags)
 JavaArchitectureAnalysisTool jar /path/to/app.jar -offline -lang en
 ```
 
-**参数说明**:
+**Parameters**:
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-offline` | `false` | 离线模式,跳过 Maven Central 查询,仅靠 jar 内嵌元数据识别库 |
-| `-lang` | 自动检测 | 输出语言:`zh` / `en`(自动读取系统 `LANG` 环境变量) |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-offline` | `false` | Offline mode, skips Maven Central queries, relies only on jar-embedded metadata for library identification |
+| `-lang` | Auto-detect | Output language: `zh` / `en` (auto-detects from system `LANG` environment variable) |
 
-**输出内容**:
+**Output Contents**:
 
-- **C/C++ 本地架构产物列表**:逐个列出 jar 内的本地库文件,标注格式(中文)、架构(中文)、文件大小、来源路径
-- **各平台支持架构总览**:按平台(Linux / macOS / Windows / AIX)列出支持的架构集合
-- **架构缺失分析**:相对于同平台其他库的完整架构集,指出某个库缺失哪些架构(用归一化库名合并同库不同架构的文件,如 `libsnappyjava.dylib` + `libsnappyjava.jnilib` 会合并)
-- **依赖库列表**:按 jar 文件路径分组打印,标题只打印一次,避免重复
+- **C/C++ native artifact list**: Lists each native library file inside the jar, annotating format, architecture, file size, and source path
+- **Architecture support overview by platform**: Lists supported architecture sets per platform (Linux / macOS / Windows / AIX)
+- **Architecture gap analysis**: Relative to the complete architecture set of other libraries on the same platform, identifies which architectures a library is missing (uses normalized library names to merge files of the same library with different architectures, e.g., `libsnappyjava.dylib` + `libsnappyjava.jnilib` are merged)
+- **Dependency library list**: Printed grouped by jar file path; title printed only once to avoid repetition
 
-**架构识别能力**:
+**Architecture Identification Capabilities**:
 
-| 格式 | 支持的架构 |
-|------|-----------|
-| ELF (Linux/BSD) | x86_64、i386、aarch64、arm、armv7、riscv64、riscv32、loongarch64、loongarch32、mips、mips64、ppc、ppc64、s390、s390x、sparc、sparc64、ia64 |
-| Mach-O (macOS/iOS) | x86_64、i386、arm64、armv7;支持 Fat/Universal Binary(一个文件含多 slice,会去重) |
-| PE (Windows) | x86_64 (AMD64)、x86 (i386)、ia64 |
-| XCOFF (AIX) | ppc、ppc64 |
-| Archive (.a / .lib) | 递归解析内部成员,支持 GNU ar 和 BSD ar 格式,按内部成员的格式(ELF/Mach-O)推断架构 |
+| Format | Supported Architectures |
+|--------|------------------------|
+| ELF (Linux/BSD) | x86_64, i386, aarch64, arm, armv7, riscv64, riscv32, loongarch64, loongarch32, mips, mips64, ppc, ppc64, s390, s390x, sparc, sparc64, ia64 |
+| Mach-O (macOS/iOS) | x86_64, i386, arm64, armv7; supports Fat/Universal Binary (one file with multiple slices, deduplicated) |
+| PE (Windows) | x86_64 (AMD64), x86 (i386), ia64 |
+| XCOFF (AIX) | ppc, ppc64 |
+| Archive (.a / .lib) | Recursively parses internal members, supports GNU ar and BSD ar formats, infers architecture from internal member formats (ELF/Mach-O) |
 
-### 2. `pom` 子命令 — 解析 Maven 依赖树
+### 2. `pom` Subcommand — Parse Maven Dependency Tree
 
 ```bash
-# 离线模式 (默认),只用本地 ~/.m2/repository
+# Offline mode (default), using only local ~/.m2/repository
 JavaArchitectureAnalysisTool pom pom.xml
 
-# 允许访问 Maven Central 拉取缺失的传递依赖 pom
+# Allow Maven Central access to fetch missing transitive dependency poms
 JavaArchitectureAnalysisTool pom -offline=false pom.xml
 
-# 指定私有仓库
+# Specify private repository
 JavaArchitectureAnalysisTool pom -remote=https://my.repo/maven2/ pom.xml
 
-# 英文输出
+# English output
 JavaArchitectureAnalysisTool pom -lang en pom.xml
 ```
 
-**参数说明**:
+**Parameters**:
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-offline` | `true` | 是否只使用本地 `~/.m2/repository`,不访问远程 Maven Central |
-| `-remote` | — | 远程仓库 URL(仅当 `-offline=false` 时生效,默认 Maven Central) |
-| `-lang` | 自动检测 | 输出语言:`zh` / `en`(自动读取系统 `LANG` 环境变量) |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-offline` | `true` | Use only local `~/.m2/repository`, no remote Maven Central access |
+| `-remote` | — | Remote repository URL (only effective when `-offline=false`, defaults to Maven Central) |
+| `-lang` | Auto-detect | Output language: `zh` / `en` (auto-detects from system `LANG` environment variable) |
 
-输出完整的传递依赖列表和 `ID → DependsOn` 依赖关系图。
+Outputs complete transitive dependency list and `ID → DependsOn` dependency relationship graph.
 
-### 3. `overlay` 子命令 — 本地库覆盖方案
+### 3. `overlay` Subcommand — Native Library Overlay Plan
 
-**原理**:JVM 加载本地库时先搜索 `-Djava.library.path` 指定的目录,找到同名文件后不再从 jar 包内部提取。把所需本地库放到外部目录,就能跳过 jar 内部的同名库,实现补架构、换版本、修复漏洞等目的,对 jar 本身完全无侵入。
+**Principle**: When the JVM loads native libraries, it searches the directory specified by `-Djava.library.path` first; once a file with the same name is found, it won't extract from inside the jar. By placing required native libraries in an external directory, you can skip same-named libraries inside the jar, achieving architecture supplementation, version changes, vulnerability fixes, etc., completely non-intrusively to the jar itself.
 
 ```bash
-# 基本用法:只分析,打印建议和下载 URL
+# Basic usage: analysis only, print suggestions and download URLs
 JavaArchitectureAnalysisTool overlay /path/to/app.jar
 
-# 指定目标平台/架构
+# Specify target platform/architecture
 JavaArchitectureAnalysisTool overlay app.jar -os linux -arch aarch64
 
-# 指定 macOS ARM (Apple Silicon) 目标
+# Specify macOS ARM (Apple Silicon) target
 JavaArchitectureAnalysisTool overlay app.jar -os darwin -arch arm64
 
-# 指定 Windows x86_64 目标
+# Specify Windows x86_64 target
 JavaArchitectureAnalysisTool overlay app.jar -os windows -arch x86_64
 
-# 默认下载:不指定 -mirror,自动从 Maven 仓库下载 jar 并提取 .so
+# Default download: without -mirror, automatically downloads jar from Maven repo and extracts .so
 JavaArchitectureAnalysisTool overlay app.jar -os linux -arch aarch64 -download
 
-# 指定本地已有的库 + 镜像 URL 模板 + 实际下载
+# Specify existing local libraries + mirror URL template + actual download
 JavaArchitectureAnalysisTool overlay app.jar \
     -local libsnappyjava.so=/opt/libs/libsnappyjava.so \
     -mirror https://mirrors.example.com/native/{lib}/{os}/{arch}/{libfile} \
     -download -outdir /opt/app-native-libs
 
-# 指定多个本地库 + 设置下载超时
+# Specify multiple local libraries + set download timeout
 JavaArchitectureAnalysisTool overlay app.jar \
     -local libsnappyjava.so=/opt/libs/libsnappyjava.so \
     -local libzstd-jni.so=/opt/libs/libzstd-jni.so \
     -download -timeout 120 -outdir /opt/app-native-libs
 
-# 英文输出
+# English output
 JavaArchitectureAnalysisTool overlay app.jar -lang en -os linux -arch aarch64 -download
 
-# 参数可混排 (位置参数前后均可)
+# Mixed parameter order (positional args before or after flags)
 JavaArchitectureAnalysisTool overlay -os linux -arch aarch64 app.jar -download
 ```
 
-**参数说明**:
+**Parameter Description**:
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-os` | 当前系统 | 目标 OS:`linux` / `darwin` / `windows` / `aix` |
-| `-arch` | 当前架构 | 目标架构:`x86_64` / `aarch64` / `arm64` / `arm` / `riscv64` 等 |
-| `-outdir` | `./native-overlay` | 外部库输出目录 |
-| `-local` | — | 指定某个库的本地文件,格式 `libname=path`,可重复传 |
-| `-mirror` | — | 镜像 URL 模板,占位符:`{lib}` `{libfile}` `{os}` `{arch}` |
-| `-download` | `false` | 实际下载缺失的库(默认只打印 URL) |
-| `-timeout` | `60` | 下载超时秒数 |
-| `-lang` | 自动检测 | 输出语言:`zh` / `en`(自动读取系统 `LANG` 环境变量) |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-os` | Current system | Target OS: `linux` / `darwin` / `windows` / `aix` |
+| `-arch` | Current architecture | Target architecture: `x86_64` / `aarch64` / `arm64` / `arm` / `riscv64`, etc. |
+| `-outdir` | `./native-overlay` | External library output directory |
+| `-local` | — | Specify a local file for a library, format `libname=path`, can be repeated |
+| `-mirror` | — | Mirror URL template, placeholders: `{lib}` `{libfile}` `{os}` `{arch}` |
+| `-download` | `false` | Actually download missing libraries (default: only print URLs) |
+| `-timeout` | `60` | Download timeout in seconds |
+| `-lang` | Auto-detect | Output language: `zh` / `en` (auto-detects from system `LANG` environment variable) |
 
-**本地库来源优先级**:
+**Native Library Source Priority**:
 
-1. `-local` 指定的本地文件 → 复制到 outdir(会与 jar 内同名文件比大小,差异 >2× 会告警)
-2. outdir 里已有的同名文件 → 跳过
-3. 指定了 `-mirror` → 使用用户指定的镜像模板生成 `.so` 直接下载 URL;加 `-download` 后实际下载
-4. 未指定 `-mirror` → 自动从嵌套 jar 的 `pom.properties` 提取 Maven 坐标,从 Maven 仓库下载对应架构的 jar 包,再从中提取 `.so` 文件
+1. `-local` specified local file → copied to outdir (size compared with same-named file in jar; difference >2× triggers warning)
+2. Same-named file already in outdir → skipped
+3. `-mirror` specified → uses user-specified mirror template to generate direct `.so` download URL; with `-download`, actually downloads
+4. No `-mirror` specified → automatically extracts Maven coordinates from nested jar's `pom.properties`, downloads the jar for the target architecture from Maven repository, then extracts `.so` file from it
 
-**Maven 仓库下载流程**(未指定 `-mirror` 时自动执行):
+**Maven Repository Download Flow** (executed automatically when `-mirror` is not specified):
 
-1. 扫描 jar 时读取每个嵌套 jar 的 `META-INF/maven/*/pom.properties`,提取 `groupId:artifactId:version`
-2. 从原 jar 文件名提取 classifier(如 `netty-transport-native-epoll-4.1.128.Final-linux-x86_64.jar` → `linux-x86_64`)
-3. 将 classifier 中的架构关键词替换为目标架构,生成多个候选(兼容不同命名约定):
-   - `x86_64` → `aarch_64`(netty 约定) / `aarch64`(通用) / `arm64`(Apple 约定)
-4. 对每个候选 classifier × 每个镜像源构造 jar 下载 URL,依次尝试
-5. 下载 jar 后打开 zip,遍历条目找到匹配目标架构的 `.so` 文件,提取到 outdir
+1. During jar scanning, reads each nested jar's `META-INF/maven/*/pom.properties` to extract `groupId:artifactId:version`
+2. Extracts classifier from the original jar filename (e.g., `netty-transport-native-epoll-4.1.128.Final-linux-x86_64.jar` → `linux-x86_64`)
+3. Replaces architecture keywords in the classifier with the target architecture, generating multiple candidates (compatible with different naming conventions):
+   - `x86_64` → `aarch_64` (netty convention) / `aarch64` (generic) / `arm64` (Apple convention)
+4. Constructs jar download URLs for each candidate classifier × each mirror source, tries them in order
+5. After downloading the jar, opens the zip, iterates entries to find the `.so` file matching the target architecture, extracts to outdir
 
-**Maven 镜像源列表**(按优先级排序,国内优先):
+**Maven Mirror Source List** (sorted by priority, China mirrors first):
 
-| 序号 | 镜像源 | Base URL |
-|:---:|--------|----------|
-| 1 | 阿里云 | `https://maven.aliyun.com/repository/central` |
-| 2 | 华为云 | `https://repo.huaweicloud.com/repository/maven-central` |
-| 3 | 腾讯云 | `https://mirrors.cloud.tencent.com/nexus/repository/maven-public` |
+| # | Mirror | Base URL |
+|:-:|--------|----------|
+| 1 | Alibaba Cloud | `https://maven.aliyun.com/repository/central` |
+| 2 | Huawei Cloud | `https://repo.huaweicloud.com/repository/maven-central` |
+| 3 | Tencent Cloud | `https://mirrors.cloud.tencent.com/nexus/repository/maven-public` |
 | 4 | Maven Central | `https://repo1.maven.org/maven2` |
-| 5 | Maven Central (备用) | `https://repo.maven.apache.org/maven2` |
+| 5 | Maven Central (backup) | `https://repo.maven.apache.org/maven2` |
 
-下载 URL 格式: `{base}/{groupIdPath}/{artifactId}/{version}/{artifactId}-{version}-{classifier}.jar`
+Download URL format: `{base}/{groupIdPath}/{artifactId}/{version}/{artifactId}-{version}-{classifier}.jar`
 
-**URL 模板占位符**:
+**URL Template Placeholders**:
 
-| 占位符 | 含义 | 示例 |
-|--------|------|------|
-| `{lib}` | 库根名(去版本号、去后缀) | `libsnappyjava` |
-| `{libfile}` | 实际文件名 | `libsnappyjava.so` |
-| `{os}` | 目标 OS | `linux` |
-| `{arch}` | 目标架构 | `aarch64` |
+| Placeholder | Meaning | Example |
+|-------------|---------|---------|
+| `{lib}` | Library root name (without version, without extension) | `libsnappyjava` |
+| `{libfile}` | Actual filename | `libsnappyjava.so` |
+| `{os}` | Target OS | `linux` |
+| `{arch}` | Target architecture | `aarch64` |
 
-示例模板:`https://mirrors.example.com/native/{lib}/{os}/{arch}/{libfile}`
+Example template: `https://mirrors.example.com/native/{lib}/{os}/{arch}/{libfile}`
 
-**输出尾部会给出 Java 启动参数建议**:
+**Java startup parameter suggestion is provided at the end of output**:
 
 ```
 java -Djava.library.path=/opt/app-native-libs -jar /path/to/app.jar
 ```
 
-## 输出规范
+## Output Conventions
 
-- **格式名带中文说明**:`ELF (Linux/BSD 可执行文件)`、`Mach-O (macOS/iOS 可执行文件)`、`PE (Windows 可执行文件)`、`XCOFF (AIX 可执行文件)`、`Archive(.a) (Unix 静态库)`
-- **架构名带中文说明**(详细列表):`x86_64 (Intel 64位)`、`aarch64 (ARM 64位)`、`riscv64 (RISC-V 64位)`、`loongarch64 (龙芯 64位)` 等
-- **概览/统计区用简写**:`[i386、x86_64]`,避免长中文让输出变乱
-- **详细文件列表用完整中文**:`arch=x86_64 (Intel 64位) + arm64 (ARM 64位)`,保证可读性
-- **进度信息走 stderr,结果走 stdout**:支持 `> result.txt` 把纯净结果重定向到文件
-- **路径脱敏**:输出中的用户主目录自动替换为 `~`,隐藏电脑账号等信息
+- **Format names with descriptions**: `ELF (Linux/BSD executable)`, `Mach-O (macOS/iOS executable)`, `PE (Windows executable)`, `XCOFF (AIX executable)`, `Archive(.a) (Unix static library)`
+- **Architecture names with descriptions** (in detailed list): `x86_64 (Intel 64-bit)`, `aarch64 (ARM 64-bit)`, `riscv64 (RISC-V 64-bit)`, `loongarch64 (LoongArch 64-bit)`, etc.
+- **Overview/statistics use short form**: `[i386, x86_64]`, avoiding lengthy descriptions cluttering the output
+- **Detailed file list uses full descriptions**: `arch=x86_64 (Intel 64-bit) + arm64 (ARM 64-bit)`, ensuring readability
+- **Progress to stderr, results to stdout**: Supports `> result.txt` to redirect clean results to a file
+- **Path masking**: User home directory in output is automatically replaced with `~` to hide account info
 
-## 国际化 (i18n)
+## Internationalization (i18n)
 
-工具支持中文和英文输出,默认从系统 `LANG` 环境变量自动检测语言(检测失败时默认中文):
+The tool supports Chinese and English output, auto-detecting from the system `LANG` environment variable by default (falls back to Chinese on detection failure):
 
 ```bash
-# 自动检测 (默认)
+# Auto-detect (default)
 JavaArchitectureAnalysisTool jar app.jar
 
-# 强制英文
+# Force English
 JavaArchitectureAnalysisTool jar app.jar -lang en
 
-# 强制中文
+# Force Chinese
 JavaArchitectureAnalysisTool jar app.jar -lang zh
 
-# 通过环境变量指定
+# Via environment variable
 LANG=en_US.UTF-8 JavaArchitectureAnalysisTool jar app.jar
 ```
 
-所有子命令(`pom`、`jar`、`overlay`)均支持 `-lang` 参数。
+All subcommands (`pom`, `jar`, `overlay`) support the `-lang` parameter.
 
-## 归一化规则
+## Normalization Rules
 
-为避免同一库因文件名差异(扩展名、架构词、平台词)被误判为不同库,`normalizeLibraryName` 会:
+To avoid the same library being misjudged as different libraries due to filename differences (extensions, architecture keywords, platform keywords), `normalizeLibraryName` will:
 
-1. **统一扩展名**:`.jnilib` → `.dylib`(都是 macOS 动态库)
-2. **去掉架构关键词**:`aarch_64` / `aarch64` / `aarch_` / `x86_64` / `x86_` / `x86` / `arm64` / `amd64` / `riscv64` / `loongarch64` / `sparc64` / `ppc64` / `s390x` / `mips64` / `i386` / `i686` / `_64` / `_32` / `64` / `32` 等
-3. **去掉平台关键词**:`linux` / `windows` / `win32` / `win64` / `win` / `macosx` / `darwin` / `osx` / `mac` / `sunos` / `aix`
-4. **清理多余分隔符**:连续 `_` 合并,首尾 `_-.` 裁剪
+1. **Unify extensions**: `.jnilib` → `.dylib` (both are macOS dynamic libraries)
+2. **Remove architecture keywords**: `aarch_64` / `aarch64` / `aarch_` / `x86_64` / `x86_` / `x86` / `arm64` / `amd64` / `riscv64` / `loongarch64` / `sparc64` / `ppc64` / `s390x` / `mips64` / `i386` / `i686` / `_64` / `_32` / `64` / `32`, etc.
+3. **Remove platform keywords**: `linux` / `windows` / `win32` / `win64` / `win` / `macosx` / `darwin` / `osx` / `mac` / `sunos` / `aix`
+4. **Clean up extra separators**: Merge consecutive `_`, trim leading/trailing `_-.`
 
-示例:
+Examples:
 - `libsnappyjava.dylib` + `libsnappyjava.jnilib` → `libsnappyjava.dylib`
 - `netty_tcnative_osx_.jnilib` + `netty_tcnative_osx_aarch_.jnilib` → `netty_tcnative.dylib`
 - `jline32.dll` + `jline64.dll` → `jline.dll`
 
-## 跨平台支持矩阵
+## Cross-Platform Support Matrix
 
-| 平台 | 架构 | 预编译二进制 |
-|------|------|-------------|
+| Platform | Architecture | Precompiled Binary |
+|----------|--------------|-------------------|
 | Linux | x86_64 | `JavaArchitectureAnalysisTool-linux-amd64` |
 | Linux | aarch64 (ARM) | `JavaArchitectureAnalysisTool-linux-arm64` |
 | Windows | x86_64 | `JavaArchitectureAnalysisTool-windows-amd64.exe` |
@@ -283,16 +283,16 @@ LANG=en_US.UTF-8 JavaArchitectureAnalysisTool jar app.jar
 | macOS | arm64 (Apple Silicon) | `JavaArchitectureAnalysisTool-darwin-arm64` |
 | macOS | Universal | `JavaArchitectureAnalysisTool-darwin-universal` |
 
-所有 Linux 二进制为静态链接,目标机器无需安装额外运行时。
+All Linux binaries are statically linked; no additional runtime required on target machines.
 
-## 注意事项
+## Notes
 
-1. **`jar -offline` 仅影响库识别**:架构扫描本身不联网,`-offline=true` 只是让 `go-dep-parser` 不去 Maven Central 查 jar 的 GAV 坐标
-2. **overlay 不修改原 jar**:所有外部库放到独立目录,通过 `-Djava.library.path` 指定,对原 jar 完全无侵入
-3. **`-local` 指定的本地文件会做大小校验**:与 jar 内同名文件大小差异超过 2 倍会告警,提示确认版本
-4. **下载使用原子写**:先写 `.part` 临时文件,完成后 rename,避免 HTTP 中断导致半截文件污染输出目录
-5. **嵌套 jar 递归有保护**:最大深度 5 层、单嵌套 jar 限 200MB,防止 zip 炸弹
-6. **参数混排支持**:所有子命令都支持 `app.jar -flag` 和 `-flag app.jar` 混排(手动重排了 Go flag 的位置参数限制)
-7. **Maven 下载是下载 jar 再提取**:未指定 `-mirror` 时,工具会从 Maven 仓库下载对应架构的 jar 包,再从 jar 内提取 `.so` 文件(Maven 仓库不直接存储 `.so`)
-8. **路径脱敏**:输出中的用户主目录自动替换为 `~`,隐藏电脑账号等敏感信息
-9. **下载文件会做架构校验**:下载成功后会扫描文件头,确认格式和架构与目标匹配
+1. **`jar -offline` only affects library identification**: Architecture scanning itself doesn't use the network; `-offline=true` only prevents `go-dep-parser` from querying Maven Central for jar GAV coordinates
+2. **overlay does not modify the original jar**: All external libraries are placed in a separate directory, specified via `-Djava.library.path`, completely non-intrusive to the original jar
+3. **`-local` specified local files undergo size validation**: If the size difference with the same-named file in the jar exceeds 2×, a warning is issued prompting version verification
+4. **Downloads use atomic writes**: Writes to `.part` temporary file first, then renames on completion, avoiding half-written files polluting the output directory due to HTTP interruptions
+5. **Nested jar recursion has safeguards**: Max depth 5, single nested jar limited to 200MB, preventing zip bombs
+6. **Mixed parameter order supported**: All subcommands support `app.jar -flag` and `-flag app.jar` mixed order (manually reorders Go flag's positional argument limitation)
+7. **Maven download downloads jar then extracts**: When `-mirror` is not specified, the tool downloads the jar for the target architecture from Maven repository, then extracts the `.so` file from it (Maven repositories don't store `.so` files directly)
+8. **Path masking**: User home directory in output is automatically replaced with `~` to hide sensitive account info
+9. **Downloaded files undergo architecture validation**: After download, file headers are scanned to confirm format and architecture match the target
